@@ -3,8 +3,8 @@ module JSON where
 
 import Data.Char
 
-import Instances
 import Parser
+import Parser.Instances
 import Specials
 
 -- | Associative container type.
@@ -65,7 +65,7 @@ between p1 p2 p3 = do
 -- >>> isErrorResult (parse (betweenCharTok '[' ']' character) "abc]")
 -- True
 betweenCharTok :: Char -> Char -> Parser a -> Parser a
-betweenCharTok = undefined
+betweenCharTok c1 c2 = between (charTok c1) (charTok c2)
 
 -- | Write a function that parses 4 hex digits and return the character value.
 --
@@ -107,7 +107,7 @@ hex = thisMany 4 (satisfy isHexDigit) >>= (\d -> case readHex d of
 -- >>> isErrorResult (parse hexu "u0axf")
 -- True
 hexu :: Parser Char
-hexu = undefined
+hexu = is 'u' >> hex
 
 -- | Return a parser that produces the given special character.
 --
@@ -124,7 +124,10 @@ hexu = undefined
 -- >>> isErrorResult (parse specialChar "a")
 -- True
 specialChar :: Parser Char
-specialChar = undefined
+specialChar = character >>= (\c -> case toSpecialCharacter c of
+  Just x -> pure $ fromSpecialCharacter x
+  Nothing -> failed $ UnexpectedChar c)
+
 -- | Parse a special character or a hexadecimal in JSON, has to start with
 -- @\\@. See <http://json.org> for the full list of control characters in JSON.
 --
@@ -139,7 +142,7 @@ specialChar = undefined
 -- >>> isErrorResult (parse jsonSpecial "\\a")
 -- True
 jsonSpecial :: Parser Char
-jsonSpecial = undefined
+jsonSpecial = is '\\' >> (hexu ||| specialChar)
 
 -- | Parse a JSON string. Handle double-quotes, special characters, hexadecimal
 -- characters.
@@ -176,7 +179,7 @@ jsonSpecial = undefined
 -- >>> isErrorResult (parse jsonString "\"\\abc\"def")
 -- True
 jsonString :: Parser String
-jsonString = undefined
+jsonString = between (is '\"') (charTok '\"') (list (jsonSpecial ||| noneof "\"\\"))
 
 -- | Parse a JSON rational.
 --
@@ -203,7 +206,12 @@ jsonString = undefined
 -- >>> isErrorResult (parse jsonNumber "abc")
 -- True
 jsonNumber :: Parser Rational
-jsonNumber = undefined
+jsonNumber = P f
+  where
+    f s = case readFloats s of
+     Just (x, rest) -> Result rest x
+     Nothing -> Error UnexpectedEof
+
 -- | Parse a JSON true literal.
 --
 -- /Hint/: Use 'stringTok'.
@@ -214,7 +222,7 @@ jsonNumber = undefined
 -- >>> isErrorResult (parse jsonTrue "TRUE")
 -- True
 jsonTrue :: Parser String
-jsonTrue = undefined
+jsonTrue = stringTok "true"
 
 -- | Parse a JSON false literal.
 --
@@ -226,7 +234,7 @@ jsonTrue = undefined
 -- >>> isErrorResult (parse jsonFalse "FALSE")
 -- True
 jsonFalse :: Parser String
-jsonFalse = undefined
+jsonFalse = stringTok "false"
 
 -- | Parse a JSON null literal.
 --
@@ -238,7 +246,7 @@ jsonFalse = undefined
 -- >>> isErrorResult (parse jsonNull "NULL")
 -- True
 jsonNull :: Parser String
-jsonNull = undefined
+jsonNull = stringTok "null"
 
 -- | Write a parser that parses between the two given characters, separated by
 -- a comma character ','.
@@ -266,28 +274,14 @@ jsonNull = undefined
 -- >>> isErrorResult (parse (betweenSepbyComma '[' ']' lower) "a]")
 -- True
 betweenSepbyComma :: Char -> Char -> Parser a -> Parser [a]
-betweenSepbyComma = undefined
+betweenSepbyComma c1 c2 p = betweenCharTok c1 c2 (sepby p commaTok)
 
 -- | Parse a JSON array.
 --
 -- /Hint/: Use 'betweenSepbyComma' and 'jsonValue'.
 --
--- >>> parse jsonArray "[]"
--- Result >< []
---
--- >>> parse jsonArray "[true]"
--- Result >< [JsonTrue]
---
--- >>> parse jsonArray "[true, \"abc\"]"
--- Result >< [JsonTrue,JsonString "abc"]
---
--- >>> parse jsonArray "[true, \"abc\", []]"
--- Result >< [JsonTrue,JsonString "abc",JsonArray []]
---
--- >>> parse jsonArray "[true, \"abc\", [false]]"
--- Result >< [JsonTrue,JsonString "abc",JsonArray [JsonFalse]]
 jsonArray :: Parser [JsonValue]
-jsonArray = undefined
+jsonArray = betweenSepbyComma '[' ']' (jsonValue)
 
 -- | Parse a JSON object.
 --
@@ -297,19 +291,15 @@ jsonArray = undefined
 --
 -- /Hint/: Use anonymous apply '<*' to omit tokens.
 --
--- >>> parse jsonObject "{}"
--- Result >< []
---
--- >>> parse jsonObject "{ \"key1\" : true }"
--- Result >< [("key1",JsonTrue)]
---
--- >>> parse jsonObject "{ \"key1\" : true , \"key2\" : false }"
--- Result >< [("key1",JsonTrue),("key2",JsonFalse)]
---
--- >>> parse jsonObject "{ \"key1\" : true , \"key2\" : false } xyz"
--- Result >xyz< [("key1",JsonTrue),("key2",JsonFalse)]
+
 jsonObject :: Parser Assoc
-jsonObject = undefined
+jsonObject = betweenSepbyComma '{' '}' jsonObjectHelper
+
+jsonObjectHelper :: Parser (String, JsonValue)
+jsonObjectHelper = do
+  key <- jsonString <* charTok ':'
+  value <- jsonValue
+  pure (key, value)
 
 -- | Parse a JSON value.
 --
@@ -324,16 +314,53 @@ jsonObject = undefined
 -- >>> parse jsonValue "true"
 -- Result >< JsonTrue
 --
+jsonValue :: Parser JsonValue
+jsonValue = JsonTrue <$ jsonTrue
+  ||| JsonFalse <$ jsonFalse
+  ||| JsonNull <$ jsonNull
+  ||| JsonString <$> jsonString
+  ||| JsonRational <$> jsonNumber
+  ||| JsonObject <$> jsonObject
+  ||| JsonArray <$> jsonArray
+
+-- >>> parse jsonArray "[]"
+-- Result >< []
+--
+-- >>> parse jsonArray "[true]"
+-- Result >< [JsonTrue]
+--
+-- >>> parse jsonArray "[true, \"abc\"]"
+-- Result >< [JsonTrue,JsonString "abc"]
+--
+-- >>> parse jsonArray "[true, \"abc\", []]"
+-- Result >< [JsonTrue,JsonString "abc",JsonArray []]
+
 -- >>> parse jsonObject "{ \"key1\" : true , \"key2\" : [7, false] }"
 -- Result >< [("key1",JsonTrue),("key2",JsonArray [JsonRational (7 % 1),JsonFalse])]
 --
 -- >>> parse jsonObject "{ \"key1\" : true , \"key2\" : [7, false] , \"key3\" : { \"key4\" : null } }"
 -- Result >< [("key1",JsonTrue),("key2",JsonArray [JsonRational (7 % 1),JsonFalse]),("key3",JsonObject [("key4",JsonNull)])]
-jsonValue :: Parser JsonValue
-jsonValue = undefined
+
+--
+-- >>> parse jsonArray "[true, \"abc\", [false]]"
+-- Result >< [JsonTrue,JsonString "abc",JsonArray [JsonFalse]]
+
+-- >>> parse jsonObject "{}"
+-- Result >< []
+--
+-- >>> parse jsonObject "{ \"key1\" : true }"
+-- Result >< [("key1",JsonTrue)]
+--
+-- >>> parse jsonObject "{ \"key1\" : true , \"key2\" : false }"
+-- Result >< [("key1",JsonTrue),("key2",JsonFalse)]
+--
+-- >>> parse jsonObject "{ \"key1\" : true , \"key2\" : false } xyz"
+-- Result >xyz< [("key1",JsonTrue),("key2",JsonFalse)]
 
 -- | Read a file into a JSON value.
 --
 -- /Hint/: Use 'readFile' and 'jsonValue'.
 readJsonValue :: FilePath -> IO (ParseResult JsonValue)
-readJsonValue f = undefined
+readJsonValue f = do
+        text <- readFile f
+        return $ parse jsonValue text
