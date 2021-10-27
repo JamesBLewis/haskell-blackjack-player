@@ -61,6 +61,7 @@ attemptSoftTotals [Card _ Ace, Card _ Two] upCard _
     | upCard == Five || upCard == Six = Just Hit
 attemptSoftTotals _ _ _ = Nothing 
 
+-- | enforce a hand length rule to determine if this player is allowed to double down or not
 canDoubleDown :: Hand -> Bool
 canDoubleDown cards = length cards == startingNumCards
 
@@ -101,24 +102,30 @@ assocToTuple = Data.List.foldl (\a (key, value) -> (key, value):a) []
 getPointsById :: [PlayerPoints] -> PlayerId -> Int
 getPointsById points playerId = getIntOrZero $ lookup playerId $ pointsToTuple points
 
+-- | convert a jsonValue into an int
 getInteger :: Maybe JsonValue -> Int
 getInteger Nothing = 0
 getInteger (Just (JsonRational a)) = round a
+getInteger _ = error "invalid int"
 
+-- | cast a JsonValue as a list of JsonValues so that it is easier to interoperate
 getArray :: Maybe JsonValue -> [JsonValue]
-getArray Nothing = error "invalid string parsing operation"
 getArray (Just (JsonArray a)) = a
+getArray _ = error "invalid string parsing operation"
 
+-- | given an associative and a string. return an array
 getArrayFromMemory :: [Char] -> Assoc -> [JsonValue]  
 getArrayFromMemory c a = getArray $ lookup c (assocToTuple a)
 
+-- | get a rational number from the associative
 getRationalFromMemory :: [Char] -> Assoc -> Int  
 getRationalFromMemory c a = getInteger $ lookup c (assocToTuple a)
 
 -- TODO: implement show for JsonValue
 updateMemory :: Int -> Int -> [String] -> Int -> Int -> Int -> Int -> String
 updateMemory lastBid points actionsThisTurn cardCount remainingCards startingCardCount startingRemainingCards = "{\"lastBid\":"++show lastBid++",\"oldPoints\":"++show points++",\"actionsThisTurn\":"++ show actionsThisTurn ++",\"cardCount\":"++ show cardCount ++",\"remainingCards\":"++ show remainingCards ++",\"startingCardCount\":"++ show startingCardCount ++",\"startingRemainingCards\":"++ show startingRemainingCards ++"}"
-
+ 
+-- | determine the high-low value to modify our bid with
 calculateAdvantage :: Int -> Int -> Int
 calculateAdvantage cardCount remainingCards = cardCount `div` (max (remainingCards `div` 52) 1)
 
@@ -132,10 +139,12 @@ placeBid points value = do
     let bid = chooseBidValue points $ calculateAdvantage safeCardCount safeRemainingCards
     (Bid bid, updateMemory bid points [] safeCardCount safeRemainingCards safeCardCount safeRemainingCards)
 
+-- | pattern match specific turn history 
 makeForcedMove' :: [String] -> Maybe Action
 makeForcedMove' ["DoubleDown", "Hit"] = Just Stand
 makeForcedMove' _ = Nothing
 
+-- | pattern match specific turn history 
 makeForcedMove'' :: [String] -> Maybe Action
 makeForcedMove'' ["DoubleDown"] = Just Hit
 makeForcedMove'' _ = Nothing
@@ -144,12 +153,14 @@ makeForcedMove'' _ = Nothing
 lastN' :: Int -> [a] -> [a]
 lastN' n xs = Data.List.foldl' (const . Data.List.drop 1) xs (Data.List.drop n xs)
 
+-- | attempt to find a valid action based on the history for this turn
 makeForcedMove :: [String] -> Maybe Action
 makeForcedMove ["DoubleDown"] = Just Hit
 makeForcedMove [_] = Nothing
 -- otherwise there is more then 1 value
 makeForcedMove a = (makeForcedMove' $ lastN' 2 a) |||| (makeForcedMove'' $ lastN' 1 a)
 
+-- | take an array of JsonValues and fold it into an array of strings to use later 
 toStringArray :: [JsonValue] -> [String]
 toStringArray = Data.List.foldl (\a (JsonString s) -> a++[s]) []
 
@@ -169,25 +180,27 @@ applyFixedStrategy hand upCard points actionsThisTurn =
     |||| trace "attemptHardTotals" (attemptHardTotals hand (getRank upCard) points)
     |||| Just Stand
 
+-- | errors if a given action doesn't actually exist
 justValueOrError :: Maybe Action -> Action 
 justValueOrError (Just value) = value
 justValueOrError Nothing = error "no valid action taken by player"
 
-wasDoubleDown :: Action -> Bool
-wasDoubleDown (DoubleDown _) = True
-wasDoubleDown _ = False
-
+-- | remove any numbers from a string. This is useful when we store actions as a string
 trimAmount :: String -> String
 trimAmount xs = [ x | x <- xs, not (x `elem` " 1234567890") ]
 
+-- | determine a low-high value for a given card rank
 assignCardCountingScore :: Rank -> Int 
 assignCardCountingScore rank 
     | rank < Seven = 1
     | rank < Ten = 0
     | otherwise = -1
+
+-- | determine low-high values for a list of cards (and the upCard)
 calculateNewCardCount :: Rank -> [Rank] -> Int
 calculateNewCardCount upCard newCards = assignCardCountingScore upCard + sum (assignCardCountingScore <$> newCards)
 
+-- | convert stored card ranks into rank types
 stringToRank :: String -> Rank
 stringToRank "A" = Ace   
 stringToRank "2" = Two    
@@ -204,6 +217,7 @@ stringToRank "Q" = Queen
 stringToRank "K" = King   
 stringToRank _ = error "card rank invalid"
 
+-- | handle all logic around choosing an action and updating memory
 playHand :: Hand -> Card -> Assoc -> Int -> [Rank] -> (Action, String)
 playHand h c j p currentHands = do
     let lastBid = fromIntegral (getRationalFromMemory "lastBid" j)
@@ -215,18 +229,17 @@ playHand h c j p currentHands = do
     let cardCount = statingCardCount+(calculateNewCardCount (getRank c) currentHands)
     (action, updateMemory lastBid p (actionsThisTurn++[trimAmount $ show action]) cardCount remainingCards statingCardCount startingRemainingCards)
 
+-- | throw an error if parsing didn't work correctly
 reportParserErrors :: ParseResult Assoc -> Assoc
-reportParserErrors (Result input r) = r
+reportParserErrors (Result _ r) = r
 reportParserErrors (Error message) = error ("could not parse memory: " ++ show message)
 
+-- | parse memory
 parseJsonMemoryString :: Maybe String -> Assoc
 parseJsonMemoryString (Just string) = reportParserErrors $ parse jsonObject (trace ("parsing memory string: " ++ string) string)
 parseJsonMemoryString _ = trace "memory string was empty so making a new one." (parseJsonMemoryString $ (Just $ updateMemory 0 startingPoints [] 0 (52*3) 0 (52*3)))
 
-emptyOrString :: Maybe String -> String
-emptyOrString Nothing = ""
-emptyOrString (Just s) = s
-
+-- | fold a list of player info in to a list of card ranks to make it simpler to deal with later
 getRankOfAllHands :: [PlayerInfo] -> [Rank]
 getRankOfAllHands = Data.List.foldl (\a (PlayerInfo _ hand) -> (getRank <$> hand)++a) []
 
