@@ -17,6 +17,10 @@ import JSON
 
 import Data.Foldable
 
+import Data.List
+
+import Data.Function
+
 -- | given a set of rules apply basic strategy to be universally correct decisions
 attemptPairSplitting :: Hand -> Rank -> Points -> Maybe Action
 attemptPairSplitting [Card _ Ace, Card _ Ace] _ points = Just $ Split points
@@ -82,14 +86,15 @@ getIntOrZero Nothing = 0
 getIntOrZero (Just number) = number
 
 -- employ the Martingale System - https://upswingpoker.com/the-best-blackjack-betting-strategy-basic-explanation/
-chooseBidValue :: Int -> Int -- fromIntegral $ 
-chooseBidValue points = if startingPoints-points <= points && startingPoints-points <= maxBid then max (startingPoints-points) minBid else minBid
+-- in conjunction with card counting
+chooseBidValue :: Int -> Int -> Int -- fromIntegral $ 
+chooseBidValue points advantage = if startingPoints-points <= points && startingPoints-points <= maxBid then max (startingPoints-points) minBid else max (minBid + advantage) minBid
 
 pointsToTuple :: [PlayerPoints] -> [(PlayerId, Points)]
-pointsToTuple = foldl (\a (PlayerPoints playerId points) -> (playerId, points):a) []
+pointsToTuple = Data.List.foldl (\a (PlayerPoints playerId points) -> (playerId, points):a) []
 
 assocToTuple :: Assoc -> [(String, JsonValue)]
-assocToTuple = foldl (\a (key, value) -> (key, value):a) []
+assocToTuple = Data.List.foldl (\a (key, value) -> (key, value):a) []
 
 -- filter points by ID
 -- get a given players remaining points
@@ -110,15 +115,22 @@ getArrayFromMemory c a = getArray $ lookup c (assocToTuple a)
 getRationalFromMemory :: [Char] -> Assoc -> Int  
 getRationalFromMemory c a = getInteger $ lookup c (assocToTuple a)
 
--- TODO: use show for JsonValue
-updateMemory :: Int -> Int -> [String] -> String
-updateMemory lastBid points actionsThisTurn = "{\"lastBid\":"++show lastBid++",\"oldPoints\":"++show points++",\"actionsThisTurn\":"++ show actionsThisTurn ++"}"
+-- TODO: implement show for JsonValue
+updateMemory :: Int -> Int -> [String] -> Int -> Int -> Int -> Int -> String
+updateMemory lastBid points actionsThisTurn cardCount remainingCards startingCardCount startingRemainingCards = "{\"lastBid\":"++show lastBid++",\"oldPoints\":"++show points++",\"actionsThisTurn\":"++ show actionsThisTurn ++",\"cardCount\":"++ show cardCount ++",\"remainingCards\":"++ show remainingCards ++",\"startingCardCount\":"++ show startingCardCount ++",\"startingRemainingCards\":"++ show startingRemainingCards ++"}"
+
+calculateAdvantage :: Int -> Int -> Int
+calculateAdvantage cardCount remainingCards = cardCount `div` (max (remainingCards `div` 52) 1)
 
 -- | place a bid given a number of losses
 placeBid :: Int -> Assoc -> (Action, String)
 placeBid points value = do
-    let bid = chooseBidValue points
-    (Bid bid, updateMemory bid points [])
+    let cardCount = fromIntegral (getRationalFromMemory "cardCount" value)
+    let remainingCards = fromIntegral (getRationalFromMemory "remainingCards" value)
+    let safeRemainingCards = if remainingCards < 1 then  52*3 else remainingCards
+    let safeCardCount = if remainingCards < 0 then  0 else cardCount
+    let bid = chooseBidValue points $ calculateAdvantage safeCardCount safeRemainingCards
+    (Bid bid, updateMemory bid points [] safeCardCount safeRemainingCards safeCardCount safeRemainingCards)
 
 makeForcedMove' :: [String] -> Maybe Action
 makeForcedMove' ["DoubleDown", "Hit"] = Just Stand
@@ -130,7 +142,7 @@ makeForcedMove'' _ = Nothing
 
 -- credit to https://stackoverflow.com/questions/17252851/how-do-i-take-the-last-n-elements-of-a-list
 lastN' :: Int -> [a] -> [a]
-lastN' n xs = foldl' (const . drop 1) xs (drop n xs)
+lastN' n xs = Data.List.foldl' (const . Data.List.drop 1) xs (Data.List.drop n xs)
 
 makeForcedMove :: [String] -> Maybe Action
 makeForcedMove ["DoubleDown"] = Just Hit
@@ -139,7 +151,7 @@ makeForcedMove [_] = Nothing
 makeForcedMove a = (makeForcedMove' $ lastN' 2 a) |||| (makeForcedMove'' $ lastN' 1 a)
 
 toStringArray :: [JsonValue] -> [String]
-toStringArray = foldl (\a (JsonString s) -> a++[s]) []
+toStringArray = Data.List.foldl (\a (JsonString s) -> a++[s]) []
 
 
 -- | make a new operator to 'or' possible actions together
@@ -155,7 +167,7 @@ applyFixedStrategy hand upCard points actionsThisTurn =
     |||| attemptSoftTotals hand (getRank upCard) points 
     |||| attemptSoftTotals (reverse hand) (getRank upCard) points
     |||| trace "attemptHardTotals" (attemptHardTotals hand (getRank upCard) points)
-    |||| Just Stand -- for testing only
+    |||| Just Stand
 
 justValueOrError :: Maybe Action -> Action 
 justValueOrError (Just value) = value
@@ -168,13 +180,40 @@ wasDoubleDown _ = False
 trimAmount :: String -> String
 trimAmount xs = [ x | x <- xs, not (x `elem` " 1234567890") ]
 
+assignCardCountingScore :: Rank -> Int 
+assignCardCountingScore rank 
+    | rank < Seven = 1
+    | rank < Ten = 0
+    | otherwise = -1
+calculateNewCardCount :: Rank -> [Rank] -> Int
+calculateNewCardCount upCard newCards = assignCardCountingScore upCard + sum (assignCardCountingScore <$> newCards)
 
-playHand :: Hand -> Card -> Assoc -> Int -> (Action, String)
-playHand h c j p = do
+stringToRank :: String -> Rank
+stringToRank "A" = Ace   
+stringToRank "2" = Two    
+stringToRank "3" = Three  
+stringToRank "4" = Four  
+stringToRank "5" = Five   
+stringToRank "6" = Six    
+stringToRank "7" = Seven  
+stringToRank "8" = Eight  
+stringToRank "9" = Nine   
+stringToRank "T" = Ten    
+stringToRank "J" = Jack   
+stringToRank "Q" = Queen  
+stringToRank "K" = King   
+stringToRank _ = error "card rank invalid"
+
+playHand :: Hand -> Card -> Assoc -> Int -> [Rank] -> (Action, String)
+playHand h c j p currentHands = do
     let lastBid = fromIntegral (getRationalFromMemory "lastBid" j)
     let actionsThisTurn = toStringArray $ getArrayFromMemory "actionsThisTurn" j
     let action = justValueOrError $ applyFixedStrategy h c lastBid actionsThisTurn
-    trace ("took action: "++show action) (action, updateMemory lastBid p (actionsThisTurn++[trimAmount $ show action]))
+    let startingRemainingCards = (getRationalFromMemory "startingRemainingCards" j)  - 1
+    let remainingCards = startingRemainingCards - length currentHands
+    let statingCardCount = fromIntegral (getRationalFromMemory "StartingCardCount" j)
+    let cardCount = statingCardCount+(calculateNewCardCount (getRank c) currentHands)
+    (action, updateMemory lastBid p (actionsThisTurn++[trimAmount $ show action]) cardCount remainingCards statingCardCount startingRemainingCards)
 
 reportParserErrors :: ParseResult Assoc -> Assoc
 reportParserErrors (Result input r) = r
@@ -182,15 +221,18 @@ reportParserErrors (Error message) = error ("could not parse memory: " ++ show m
 
 parseJsonMemoryString :: Maybe String -> Assoc
 parseJsonMemoryString (Just string) = reportParserErrors $ parse jsonObject (trace ("parsing memory string: " ++ string) string)
-parseJsonMemoryString _ = trace "memory string was empty so making a new one." (parseJsonMemoryString $ (Just $ updateMemory 0 startingPoints []))
+parseJsonMemoryString _ = trace "memory string was empty so making a new one." (parseJsonMemoryString $ (Just $ updateMemory 0 startingPoints [] 0 (52*3) 0 (52*3)))
 
 emptyOrString :: Maybe String -> String
 emptyOrString Nothing = ""
 emptyOrString (Just s) = s
+
+getRankOfAllHands :: [PlayerInfo] -> [Rank]
+getRankOfAllHands = Data.List.foldl (\a (PlayerInfo _ hand) -> (getRank <$> hand)++a) []
 
 -- | This function is called once it's your t urn, and keeps getting called until your turn ends.
 playCard :: PlayFunc
 -- bidding turn at the start of a round.
 playCard Nothing allPoints _ thisPlayerId memory _ = trace  "Bidding turn" $ placeBid ( getPointsById allPoints thisPlayerId) (parseJsonMemoryString memory)
 -- else play normally
-playCard (Just upCard) allPoints _ thisPlayerId memory hand = trace ("play turn: cards " ++ show hand) $ playHand hand upCard (parseJsonMemoryString memory) (getPointsById allPoints thisPlayerId)
+playCard (Just upCard) allPoints playerInfo thisPlayerId memory hand = trace ("play turn: upCard " ++ show upCard) $ playHand hand upCard (parseJsonMemoryString memory) (getPointsById allPoints thisPlayerId) (getRankOfAllHands playerInfo)
